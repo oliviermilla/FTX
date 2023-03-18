@@ -34,35 +34,52 @@ JSON3.StructTypes.StructType(::Type{Data}) = JSON3.StructTypes.Struct()
 const webSocket = Ref{WebSockets.WebSocket}()
 
 function receive(channel::Channel)
-    WebSockets.open(WEBSOCKETS_URL) do ws
-        webSocket[] = ws
-        #try
-            for msg in ws
-                #println(response)
-                put!(channel, JSON3.read(msg, Response))
-            end
-        # catch error
-        #     if isa(error, EOFError)
-        #         println(error)
-        #     else
-        #         rethrow(error)
-        #     end
-        # end
+    for msg in webSocket[]
+        #println(response)
+        put!(channel, JSON3.read(msg, Response))
     end
 end
 
 function send(channel::Channel)
     for msg in channel
-        HTTP.WebSockets.send(webSocket[], msg)
+        WebSockets.Sockets.send(webSocket[], msg)
         @info "Sent $(msg) to FTX's websocket"
     end
 end
 
-mutable struct WebSocket
-    const receiveChannel::Channel #Task
-    const sendChannel::Channel # Task
-    function WebSocket()
-        new(Channel(receive), Channel(send))
+function connection(receiveChannel::Channel, sendChannel::Channel)
+    WebSockets.open(WEBSOCKETS_URL) do ws
+        while true
+            if !isempty(sendChannel)
+                for msg in sendChannel
+                    Sockets.send(ws, msg)
+                end
+            end
+            if !isempty(ws)
+                for msg in ws
+                    put!(receiveChannel, JSON3.read(msg, Response))
+                end
+            end
+        end
+    end
+end
+
+struct WebSocket
+    receiveChannel::Channel #Task
+    sendChannel::Channel # Task
+    function WebSocket(initialSubscriptions::AbstractDict{String,String})
+        if isempty(initialSubscriptions)
+            throw(ArgumentError("argument must not be an empty dictionnary"))
+        end
+        # Create a connection task and bind it to both send and receive channels
+        @task connection()
+        # Create send channel before receive and send first subscriptions
+        sendChan = Channel(send)
+        for (key, value) in initialSubscriptions
+            message = subscribeMessage(key, value)
+            put!(sendChan, message)
+        end
+        new(Channel(receive), sendChan)
     end
 end
 
@@ -76,7 +93,7 @@ const unsubscribeMessage(channel, market) = string_to_json("""{"op":"unsubscribe
 
 function subscribe(socket::WebSocket, channel::String, market::String)
     message = subscribeMessage(channel, market)
-    put!(socket.sendChannel, message)    
+    put!(socket.sendChannel, message)
 end
 
 function unsubscribe(socket::WebSocket, channel::String, market::String)
@@ -89,8 +106,8 @@ function ping(socket::WebSocket)
     put!(socket.sendChannel, message)
 end
 
-function open()::WebSocket
-    return WebSocket()
+function open(initialSubscriptions::AbstractDict{String,String})::WebSocket
+    return WebSocket(initialSubscriptions)
 end
 
 function close()
@@ -105,8 +122,8 @@ end
 
 # Example use
 
-socket = open()
-subscribe(socket, "trades", "ETH-PERP")
+socket = open(Dict("trades" => "ETH-PERP"))
+subscribe(socket, "trades", "BTC-PERP")
 for data in socket.receiveChannel
     println(data)
 end
